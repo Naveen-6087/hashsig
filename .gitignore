@@ -1,0 +1,8 @@
+/hashsig
+/hashsig.exe
+*.test
+*.out
+/**/testdata/fuzz/*/cache/
+.idea/
+.vscode/
+.DS_Store
