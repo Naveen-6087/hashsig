@@ -2,6 +2,7 @@ package lms
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 )
 
@@ -68,4 +69,24 @@ func BenchmarkHSS(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkSignFileStore(b *testing.B) {
+	levels := []LevelParams{{LMS_SHA256_M32_H15, LMOTS_SHA256_N32_W4}, {LMS_SHA256_M32_H10, LMOTS_SHA256_N32_W4}}
+	seed, id := randomKey(b)
+	msg := make([]byte, 64)
+	for _, n := range []uint64{1, 64} {
+		b.Run(fmt.Sprintf("reserve-%d", n), func(b *testing.B) {
+			s, err := NewSigner(levels, seed, id, State{}, FileStore{Path: filepath.Join(b.TempDir(), "state.json")})
+			if err != nil {
+				b.Fatal(err)
+			}
+			s.SetReservation(n)
+			for b.Loop() {
+				if _, err := s.Sign(msg); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
