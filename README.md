@@ -19,8 +19,7 @@ Hash-based schemes rely only on properties of the underlying hash function. That
 ## Usage
 
 ```bash
-git clone https://github.com/Naveen-6087/pq-mpc-head hashsig
-cd hashsig && go install ./cmd/hashsig
+go install github.com/Naveen-6087/hashsig/cmd/hashsig@latest
 ```
 
 ```bash
@@ -119,7 +118,3 @@ The trade-off is visible in the numbers. LMS signatures are small and fast, but 
 - Only the RFC 8554 parameter sets (SHA-256, n = m = 32) are implemented. The SHA-256/192 and SHAKE256 variants added by SP 800-208 are not.
 - Key generation recomputes whole trees. A tree is rebuilt whenever the signer moves to a new lower-level tree, and when a key is loaded. A single-level H20 tree therefore takes around 30 seconds to load on the machine above (1,024 times the H10 time). Use HSS levels of H10 or H15 instead.
 - There is no XMSS / XMSS^MT, and no hardware-backed state counter.
-
-## License
-
-MIT
