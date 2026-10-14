@@ -53,6 +53,11 @@ type Signer struct {
 	state  State
 	store  StateStore
 	trees  []*Tree // the current tree at each level
+
+	// durable is the last state written to the store. Leaves between state
+	// and durable are reserved: they may be signed with without saving again.
+	durable State
+	reserve uint64
 }
 
 // NewSigner builds a signer resuming from state (use State{} for a new key).
@@ -69,7 +74,7 @@ func NewSigner(levels []LevelParams, seed [N]byte, id [IdentifierSize]byte, stat
 	if store == nil {
 		return nil, errors.New("lms: a state store is required")
 	}
-	s := &Signer{levels: levels, seed: seed, id: id, state: state.clone(), store: store}
+	s := &Signer{levels: levels, seed: seed, id: id, state: state.clone(), durable: state.clone(), store: store, reserve: 1}
 	if err := s.loadTrees(); err != nil {
 		return nil, err
 	}
@@ -139,31 +144,72 @@ func (s *Signer) State() State {
 func (s *Signer) Remaining() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	total, pos, mult := uint64(1), uint64(0), uint64(1)
-	for l := len(s.levels) - 1; l >= 0; l-- {
-		pos += uint64(s.state.Next[l]) * mult
-		mult *= uint64(s.capacity(l))
+	total := s.total()
+	return total - min(s.position(s.state), total)
+}
+
+// SetReservation makes the signer persist its state once per n signatures
+// instead of before every one. Each save reserves the next n one-time keys,
+// so a crash wastes up to n-1 of them but can never reuse one. Call Release
+// on shutdown to hand back the unused part of the reservation.
+func (s *Signer) SetReservation(n uint64) error {
+	if n == 0 {
+		return errors.New("lms: reservation must be at least 1")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reserve = n
+	return nil
+}
+
+// Release saves the exact current state, returning reserved but unused
+// one-time keys. The signer remains usable afterwards.
+func (s *Signer) Release() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.position(s.durable) == s.position(s.state) {
+		return nil
+	}
+	if err := s.store.Save(s.state); err != nil {
+		return err
+	}
+	s.durable = s.state.clone()
+	return nil
+}
+
+func (s *Signer) total() uint64 {
+	total := uint64(1)
+	for l := range s.levels {
 		total *= uint64(s.capacity(l))
 	}
-	return total - min(pos, total)
+	return total
 }
 
-// advance returns the state after using the bottom key at `cur`, rolling
-// exhausted lower trees over to the parent's next leaf.
-func (s *Signer) advance(cur State) State {
-	next := cur.clone()
-	l := len(next.Next) - 1
-	next.Next[l]++
-	for l > 0 && next.Next[l] == s.capacity(l) {
-		next.Next[l] = 0
-		next.Next[l-1]++
-		l--
+// position is the index of the next bottom-level leaf across the whole key.
+func (s *Signer) position(st State) uint64 {
+	pos, mult := uint64(0), uint64(1)
+	for l := len(s.levels) - 1; l >= 0; l-- {
+		pos += uint64(st.Next[l]) * mult
+		mult *= uint64(s.capacity(l))
 	}
-	return next
+	return pos
 }
 
-// Sign reserves the next one-time key, persists the reservation, and only
-// then produces the HSS signature.
+// stateAt is the inverse of position; an exhausted key is [cap 0 ... 0].
+func (s *Signer) stateAt(pos uint64) State {
+	st := State{Next: make([]uint32, len(s.levels))}
+	for l := len(s.levels) - 1; l > 0; l-- {
+		c := uint64(s.capacity(l))
+		st.Next[l] = uint32(pos % c)
+		pos /= c
+	}
+	st.Next[0] = uint32(pos)
+	return st
+}
+
+// Sign reserves the next one-time key, persists the reservation unless it
+// is already covered by an earlier one, and only then produces the HSS
+// signature.
 func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,9 +219,14 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 		return nil, ErrExhausted
 	}
 	used := s.state.clone()
-	next := s.advance(used)
-	if err := s.store.Save(next); err != nil {
-		return nil, fmt.Errorf("lms: persisting state before signing: %w", err)
+	pos := s.position(used)
+	next := s.stateAt(pos + 1)
+	if pos >= s.position(s.durable) {
+		reserved := s.stateAt(min(pos+s.reserve, s.total()))
+		if err := s.store.Save(reserved); err != nil {
+			return nil, fmt.Errorf("lms: persisting state before signing: %w", err)
+		}
+		s.durable = reserved
 	}
 
 	sig := u32(uint32(bottom))
